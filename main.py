@@ -26,7 +26,7 @@ app.add_middleware(
 
 # Инициализация клиента DeepSeek
 client = OpenAI(
-    api_key="sk-fd308fe8663a4a13808c8d2cc9ba08c9",
+    api_key=os.environ.get("DEEPSEEK_API_KEY"),
     base_url="https://api.deepseek.com/v1",
 )
 
