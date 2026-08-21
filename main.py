@@ -10228,7 +10228,7 @@ async def chat(request: ChatRequest):
         messages.append({"role": "user", "content": request.message})
         
         response = client.chat.completions.create(
-            model="deepseek-chat",
+            model="deepseek-v4-flash",
             messages=messages,
             temperature=0.6,
             max_tokens=1024,
