@@ -247,7 +247,7 @@ async def chat(request: ChatRequest):
             model="deepseek-v4-flash",
             messages=messages,
             temperature=0.3,
-            max_tokens=800,
+            max_tokens=1500,
             extra_body={"reasoning_effort": "low"}
         )
         
