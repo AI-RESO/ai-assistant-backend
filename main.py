@@ -1,12 +1,15 @@
 import os
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import List, Dict, Optional
 from openai import OpenAI
 from dotenv import load_dotenv
 import re
 from datetime import datetime, timezone, timedelta
+import json
+from functools import lru_cache
 
 load_dotenv()
 
@@ -63,6 +66,8 @@ app.add_middleware(
 client = OpenAI(
     api_key=api_key,
     base_url="https://api.deepseek.com/v1",
+    timeout=30.0,
+    max_retries=2,
 )
 
 # ============================================================
@@ -74,16 +79,97 @@ class ChatRequest(BaseModel):
     history: List[Dict[str, str]] = []
     sessionId: Optional[str] = None
     pageUrl: Optional[str] = None
-    region: Optional[str] = None
+    region: Optional[str] = None          # Передаётся из виджета
+    timezone: Optional[str] = None        # Передаётся из виджета (часовой пояс)
+    stream: bool = False
 
 class ChatResponse(BaseModel):
     reply: str
     cta: Optional[dict] = None
     stage: str = "conversation"
     tokens_used: Dict[str, int] = {}
+    detected_region: Optional[str] = None  # Для отладки
 
 # ============================================================
-# 4. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+# 4. КЕШИРОВАНИЕ
+# ============================================================
+
+# Кеш ответов на популярные вопросы
+answer_cache = {}
+CACHE_TTL = 3600  # 1 час
+
+def get_cached_answer(message: str, region: str = "unknown") -> Optional[str]:
+    cache_key = f"{message.lower().strip()}:{region}"
+    if cache_key in answer_cache:
+        cache_time, reply = answer_cache[cache_key]
+        if (datetime.now() - cache_time).seconds < CACHE_TTL:
+            return reply
+        else:
+            del answer_cache[cache_key]
+    return None
+
+def set_cached_answer(message: str, reply: str, region: str = "unknown"):
+    cache_key = f"{message.lower().strip()}:{region}"
+    answer_cache[cache_key] = (datetime.now(), reply)
+
+# ============================================================
+# 5. ОПРЕДЕЛЕНИЕ РЕГИОНА ПО ЧАСОВОМУ ПОЯСУ
+# ============================================================
+
+# Часовые пояса, которые соответствуют Москве и Московской области
+MOSCOW_TIMEZONES = {
+    "Europe/Moscow",
+    "Europe/Volgograd",
+    "Europe/Saratov",
+    "Europe/Ulyanovsk",
+    "Europe/Samara",
+    "Europe/Kirov",
+}
+
+def detect_region_by_timezone(timezone: str) -> str:
+    """
+    Определяет регион по часовому поясу браузера.
+    Возвращает: "moscow" или "region"
+    """
+    if not timezone:
+        return "unknown"
+    
+    # Очищаем от лишних пробелов
+    tz = timezone.strip()
+    
+    if tz in MOSCOW_TIMEZONES:
+        return "moscow"
+    
+    # Дополнительная проверка: если часовой пояс начинается с Europe/
+    # и не входит в список московских — скорее всего это регион
+    if tz.startswith("Europe/"):
+        return "region"
+    
+    # Все остальные часовые пояса (Азия, другие) — регион
+    return "region"
+
+def detect_region_from_request(request: Request, chat_request: ChatRequest) -> str:
+    """
+    Комбинированное определение региона:
+    1. Если передан region в запросе — используем его
+    2. Если передан timezone в запросе — определяем по нему
+    3. Иначе — "unknown"
+    """
+    # 1. Используем переданный регион (если есть)
+    if chat_request.region and chat_request.region != "unknown":
+        return chat_request.region
+    
+    # 2. Определяем по часовому поясу
+    if chat_request.timezone:
+        detected = detect_region_by_timezone(chat_request.timezone)
+        if detected != "unknown":
+            return detected
+    
+    # 3. Если ничего не помогло — возвращаем "unknown"
+    return "unknown"
+
+# ============================================================
+# 6. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
 # ============================================================
 
 def is_working_hours() -> bool:
@@ -102,6 +188,11 @@ def get_time_info() -> str:
     status = "Рабочее" if is_working else "Нерабочее"
     return f"ТЕКУЩЕЕ ВРЕМЯ: {status}. {'Можно предлагать звонок.' if is_working else 'НЕЛЬЗЯ предлагать звонок, только заявку.'}"
 
+# Кешированный поиск по базе знаний
+@lru_cache(maxsize=256)
+def find_relevant_sections_cached(query: str, max_sections: int = 2):
+    return find_relevant_sections(query, KNOWLEDGE_BASE, max_sections)
+
 def find_relevant_sections(query: str, knowledge_base: str, max_sections: int = 2):
     if not knowledge_base:
         return ""
@@ -109,7 +200,7 @@ def find_relevant_sections(query: str, knowledge_base: str, max_sections: int = 
     keywords = re.findall(r'[А-Яа-яA-Za-z0-9]{3,}', query.lower())
     
     if not keywords:
-        return knowledge_base[:3000]
+        return knowledge_base[:5000]
     
     sections = re.split(r'(?=^={3,} )', knowledge_base, flags=re.MULTILINE)
     
@@ -148,15 +239,12 @@ def find_relevant_sections(query: str, knowledge_base: str, max_sections: int = 
     return "\n\n".join(top_sections)
 
 def extract_cta_from_reply(reply: str) -> Optional[dict]:
+    if not any(keyword in reply.lower() for keyword in ["позвонить", "заявку", "оформление", "полис", "оформить"]):
+        return None
+    
     has_phone_moscow = "+7 (499) 704-01-16" in reply or "704-01-16" in reply
     has_phone_regions = "+7 (499) 704-01-50" in reply or "704-01-50" in reply
     has_form = "forma-ai" in reply or "оставьте заявку" in reply.lower()
-    
-    cta_keywords = ["позвонить", "заявку", "оформление", "полис", "оформить"]
-    has_cta = any(keyword in reply.lower() for keyword in cta_keywords)
-    
-    if not has_cta:
-        return None
     
     actions = []
     
@@ -217,32 +305,54 @@ def extract_cta_from_reply(reply: str) -> Optional[dict]:
     }
 
 # ============================================================
-# 5. ЭНДПОИНТ ЧАТА
+# 7. ОСНОВНОЙ ЭНДПОИНТ ЧАТА
 # ============================================================
 
 @app.post("/api/chat")
-async def chat(request: ChatRequest):
+async def chat(request: Request, chat_request: ChatRequest):
     try:
-        time_info = get_time_info()
-        region = request.region or "unknown"
+        # 1. Определяем регион
+        detected_region = detect_region_from_request(request, chat_request)
         
-        relevant_knowledge = find_relevant_sections(
-            query=request.message,
-            knowledge_base=KNOWLEDGE_BASE,
+        # 2. Проверяем кеш (с учётом региона)
+        cached_reply = get_cached_answer(chat_request.message, detected_region)
+        if cached_reply:
+            print(f"⚡ Кеш-хит для: {chat_request.message[:30]}... (регион: {detected_region})")
+            cta = extract_cta_from_reply(cached_reply)
+            return ChatResponse(
+                reply=cached_reply,
+                cta=cta,
+                stage="conversation",
+                tokens_used={"cached": True},
+                detected_region=detected_region
+            )
+        
+        # 3. Получаем информацию о времени
+        time_info = get_time_info()
+        region = detected_region if detected_region != "unknown" else "region"
+        
+        # 4. Поиск по базе знаний (с кешированием)
+        relevant_knowledge = find_relevant_sections_cached(
+            query=chat_request.message,
             max_sections=2
         )
         
+        # 5. Полная история — 10 сообщений
+        history = chat_request.history[-10:] if chat_request.history else []
+        
+        # 6. Формируем сообщения
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "system", "content": f"ДОПОЛНИТЕЛЬНАЯ ИНФОРМАЦИЯ:\nВремя: {time_info}\nРегион клиента: {region}"},
             {"role": "system", "content": "База знаний (только нужные разделы):\n\n" + relevant_knowledge}
         ]
         
-        for msg in request.history[-10:]:
+        for msg in history:
             messages.append(msg)
         
-        messages.append({"role": "user", "content": request.message})
+        messages.append({"role": "user", "content": chat_request.message})
         
+        # 7. Вызов API
         response = client.chat.completions.create(
             model="deepseek-v4-flash",
             messages=messages,
@@ -252,8 +362,14 @@ async def chat(request: ChatRequest):
         )
         
         reply = response.choices[0].message.content
+        
+        # 8. Сохраняем в кеш (с учётом региона)
+        set_cached_answer(chat_request.message, reply, detected_region)
+        
+        # 9. Извлекаем CTA
         cta = extract_cta_from_reply(reply)
         
+        # 10. Определяем стадию
         if "здравствуйте" in reply.lower() or "привет" in reply.lower():
             stage = "greeting"
         elif "как вам удобнее" in reply.lower() or "какой вариант" in reply.lower():
@@ -261,8 +377,8 @@ async def chat(request: ChatRequest):
         else:
             stage = "conversation"
         
-        print(f"📊 Токены: prompt={response.usage.prompt_tokens}, completion={response.usage.completion_tokens}, total={response.usage.total_tokens}")
-        print(f"📍 Регион: {region}, Время: {'Рабочее' if is_working_hours() else 'Нерабочее'}")
+        print(f"📊 Токены: prompt={response.usage.prompt_tokens}, completion={response.usage.completion_tokens}")
+        print(f"📍 Регион: {detected_region} (исходный: {chat_request.timezone})")
         
         return ChatResponse(
             reply=reply,
@@ -272,7 +388,8 @@ async def chat(request: ChatRequest):
                 "prompt": response.usage.prompt_tokens,
                 "completion": response.usage.completion_tokens,
                 "total": response.usage.total_tokens,
-            }
+            },
+            detected_region=detected_region
         )
     
     except Exception as e:
@@ -288,16 +405,101 @@ async def chat(request: ChatRequest):
                     {"type": "form", "label": "📝 Оставить заявку", "value": "https://resostrahovka.ru/forma-ai/", "description": "мы перезвоним сами"}
                 ]
             },
-            stage="error"
+            stage="error",
+            detected_region="unknown"
         )
 
 # ============================================================
-# 6. ПРОВЕРКА РАБОТЫ
+# 8. ЭНДПОИНТ ДЛЯ СТРИМИНГА
+# ============================================================
+
+@app.post("/api/chat/stream")
+async def chat_stream(request: Request, chat_request: ChatRequest):
+    """Стриминг с сохранением полного качества ответа"""
+    
+    async def generate():
+        try:
+            # Определяем регион
+            detected_region = detect_region_from_request(request, chat_request)
+            region = detected_region if detected_region != "unknown" else "region"
+            
+            # Проверяем кеш
+            cached_reply = get_cached_answer(chat_request.message, detected_region)
+            if cached_reply:
+                for i in range(0, len(cached_reply), 20):
+                    chunk = cached_reply[i:i+20]
+                    yield f"data: {json.dumps({'content': chunk})}\n\n"
+                yield "data: [DONE]\n\n"
+                return
+            
+            # Получаем информацию
+            time_info = get_time_info()
+            
+            # Поиск по БЗ (с кешированием)
+            relevant_knowledge = find_relevant_sections_cached(
+                query=chat_request.message,
+                max_sections=2
+            )
+            
+            # Полная история — 10 сообщений
+            history = chat_request.history[-10:] if chat_request.history else []
+            
+            # Формируем сообщения
+            messages = [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "system", "content": f"ДОПОЛНИТЕЛЬНАЯ ИНФОРМАЦИЯ:\nВремя: {time_info}\nРегион клиента: {region}"},
+                {"role": "system", "content": "База знаний (только нужные разделы):\n\n" + relevant_knowledge}
+            ]
+            
+            for msg in history:
+                messages.append(msg)
+            
+            messages.append({"role": "user", "content": chat_request.message})
+            
+            # Стриминг
+            stream = client.chat.completions.create(
+                model="deepseek-v4-flash",
+                messages=messages,
+                temperature=0.3,
+                max_tokens=1500,
+                extra_body={"reasoning_effort": "low"},
+                stream=True
+            )
+            
+            full_reply = ""
+            for chunk in stream:
+                if chunk.choices and chunk.choices[0].delta.content:
+                    content = chunk.choices[0].delta.content
+                    full_reply += content
+                    yield f"data: {json.dumps({'content': content})}\n\n"
+            
+            # Сохраняем в кеш
+            set_cached_answer(chat_request.message, full_reply, detected_region)
+            
+            yield "data: [DONE]\n\n"
+            
+        except Exception as e:
+            print(f"Ошибка стриминга: {e}")
+            error_msg = "Извините, произошла ошибка. Пожалуйста, попробуйте позже."
+            yield f"data: {json.dumps({'content': error_msg})}\n\n"
+            yield "data: [DONE]\n\n"
+    
+    return StreamingResponse(generate(), media_type="text/event-stream")
+
+# ============================================================
+# 9. ПРОВЕРКА РАБОТЫ
 # ============================================================
 
 @app.get("/")
 async def root():
-    return {"status": "ok", "message": "AI Assistant Backend is running!", "model": "deepseek-v4-flash"}
+    return {
+        "status": "ok", 
+        "message": "AI Assistant Backend is running!", 
+        "model": "deepseek-v4-flash",
+        "quality": "full",
+        "cache": "enabled",
+        "region_detection": "timezone"
+    }
 
 @app.get("/health")
 async def health():
@@ -305,11 +507,21 @@ async def health():
     return {
         "status": "healthy",
         "working_hours": is_working,
-        "time": datetime.now().astimezone(timezone(timedelta(hours=3))).strftime("%Y-%m-%d %H:%M:%S MSK")
+        "time": datetime.now().astimezone(timezone(timedelta(hours=3))).strftime("%Y-%m-%d %H:%M:%S MSK"),
+        "cache_size": len(answer_cache),
+        "quality_mode": "full",
+        "region_detection": "timezone"
     }
 
+@app.delete("/cache")
+async def clear_cache():
+    """Очистка кеша (для администрирования)"""
+    answer_cache.clear()
+    find_relevant_sections_cached.cache_clear()
+    return {"status": "ok", "message": "Cache cleared"}
+
 # ============================================================
-# 7. ЗАПУСК
+# 10. ЗАПУСК
 # ============================================================
 
 if __name__ == "__main__":
