@@ -151,16 +151,27 @@ def is_working_hours() -> bool:
     now = datetime.now().astimezone(timezone(timedelta(hours=3)))
     hour = now.hour
     day = now.weekday()
-    if day == 6:
+    if day == 6:  # Воскресенье
         return False
-    if day == 5:
+    if day == 5:  # Суббота
         return 10 <= hour < 16
     return 10 <= hour < 20
 
 def get_time_info() -> str:
+    """Возвращает информацию о текущем времени, дне недели и статусе работы."""
+    now = datetime.now().astimezone(timezone(timedelta(hours=3)))
+    hour = now.hour
+    minute = now.minute
+    day = now.weekday()
+    
+    # Дни недели на русском
+    days = ["Понедельник", "Вторник", "Среда", "Четверг", "Пятница", "Суббота", "Воскресенье"]
+    day_name = days[day]
+    
     is_working = is_working_hours()
     status = "Рабочее" if is_working else "Нерабочее"
-    return f"ТЕКУЩЕЕ ВРЕМЯ: {status}. {'Можно предлагать звонок.' if is_working else 'НЕЛЬЗЯ предлагать звонок, только заявку.'}"
+    
+    return f"ТЕКУЩЕЕ ВРЕМЯ: {hour:02d}:{minute:02d}, день недели: {day_name}, статус: {status}. {'Можно предлагать звонок.' if is_working else 'НЕЛЬЗЯ предлагать звонок, только заявку.'}"
 
 @lru_cache(maxsize=256)
 def find_relevant_sections_cached(query: str, max_sections: int = 2):
@@ -314,8 +325,8 @@ async def chat(request: Request, chat_request: ChatRequest):
             {"role": "system", "content": "База знаний (только нужные разделы):\n\n" + relevant_knowledge},
         ]
         
-        # ДИНАМИЧЕСКАЯ ЧАСТЬ
-        dynamic_info = f"ДОПОЛНИТЕЛЬНАЯ ИНФОРМАЦИЯ:\nВремя: {time_info}\nРегион клиента: {region}"
+        # ДИНАМИЧЕСКАЯ ЧАСТЬ — содержит время, день недели и регион
+        dynamic_info = f"ДОПОЛНИТЕЛЬНАЯ ИНФОРМАЦИЯ:\n{time_info}\nРегион клиента: {region}"
         messages.append({"role": "system", "content": dynamic_info})
         
         for msg in history:
@@ -405,7 +416,7 @@ async def chat_stream(request: Request, chat_request: ChatRequest):
             ]
             
             # ДИНАМИЧЕСКАЯ ЧАСТЬ
-            dynamic_info = f"ДОПОЛНИТЕЛЬНАЯ ИНФОРМАЦИЯ:\nВремя: {time_info}\nРегион клиента: {region}"
+            dynamic_info = f"ДОПОЛНИТЕЛЬНАЯ ИНФОРМАЦИЯ:\n{time_info}\nРегион клиента: {region}"
             messages.append({"role": "system", "content": dynamic_info})
             
             for msg in history:
