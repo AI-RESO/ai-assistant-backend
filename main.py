@@ -158,13 +158,11 @@ def is_working_hours() -> bool:
     return 10 <= hour < 20
 
 def get_time_info() -> str:
-    """Возвращает информацию о текущем времени, дне недели и статусе работы."""
     now = datetime.now().astimezone(timezone(timedelta(hours=3)))
     hour = now.hour
     minute = now.minute
     day = now.weekday()
     
-    # Дни недели на русском
     days = ["Понедельник", "Вторник", "Среда", "Четверг", "Пятница", "Суббота", "Воскресенье"]
     day_name = days[day]
     
@@ -317,7 +315,11 @@ async def chat(request: Request, chat_request: ChatRequest):
             query=chat_request.message,
             max_sections=2
         )
-        history = chat_request.history[-5:] if chat_request.history else []
+        
+        # ============================================================
+        # 🔧 ОПТИМАЛЬНАЯ НАСТРОЙКА: 8 сообщений истории
+        # ============================================================
+        history = chat_request.history[-8:] if chat_request.history else []
         
         # СТАТИЧЕСКАЯ ЧАСТЬ — ДЛЯ КЕШИРОВАНИЯ ПРЕФИКСОВ
         messages = [
@@ -333,15 +335,31 @@ async def chat(request: Request, chat_request: ChatRequest):
             messages.append(msg)
         messages.append({"role": "user", "content": chat_request.message})
         
+        # ============================================================
+        # 🔧 ОПТИМАЛЬНЫЕ ПАРАМЕТРЫ: temperature=0.25, max_tokens=1500
+        # ============================================================
         response = client.chat.completions.create(
             model="deepseek-v4-flash",
             messages=messages,
-            temperature=0.20,
-            max_tokens=1200,
+            temperature=0.25,
+            max_tokens=1500,
             extra_body={"reasoning_effort": "low"}
         )
         
         reply = response.choices[0].message.content
+        
+        # ============================================================
+        # 🔧 ЗАЩИТА ОТ ПУСТЫХ ОТВЕТОВ
+        # ============================================================
+        if not reply or len(reply.strip()) < 5:
+            print(f"⚠️ ПУСТОЙ ОТВЕТ для запроса: {chat_request.message[:50]}...")
+            reply = """Извините, я не смог сформулировать ответ. Пожалуйста, позвоните нашему агенту:
+
+📞 **Москва:** [+7 (499) 704-01-16](tel:+74997040116)
+📞 **Регионы:** [+7 (499) 704-01-50](tel:+74997040150)
+
+Или [📝 оставьте заявку](https://resostrahovka.ru/forma-ai/) — мы перезвоним вам сами."""
+        
         set_cached_answer(chat_request.message, reply, detected_region)
         
         cta = extract_cta_from_reply(reply)
@@ -407,7 +425,11 @@ async def chat_stream(request: Request, chat_request: ChatRequest):
                 query=chat_request.message,
                 max_sections=2
             )
-            history = chat_request.history[-5:] if chat_request.history else []
+            
+            # ============================================================
+            # 🔧 ОПТИМАЛЬНАЯ НАСТРОЙКА: 8 сообщений истории (для стриминга)
+            # ============================================================
+            history = chat_request.history[-8:] if chat_request.history else []
             
             # СТАТИЧЕСКАЯ ЧАСТЬ — ДЛЯ КЕШИРОВАНИЯ ПРЕФИКСОВ
             messages = [
@@ -423,11 +445,14 @@ async def chat_stream(request: Request, chat_request: ChatRequest):
                 messages.append(msg)
             messages.append({"role": "user", "content": chat_request.message})
             
+            # ============================================================
+            # 🔧 ОПТИМАЛЬНЫЕ ПАРАМЕТРЫ: temperature=0.25, max_tokens=1500
+            # ============================================================
             stream = client.chat.completions.create(
                 model="deepseek-v4-flash",
                 messages=messages,
-                temperature=0.20,
-                max_tokens=1200,
+                temperature=0.25,
+                max_tokens=1500,
                 extra_body={"reasoning_effort": "low"},
                 stream=True
             )
@@ -438,6 +463,20 @@ async def chat_stream(request: Request, chat_request: ChatRequest):
                     content = chunk.choices[0].delta.content
                     full_reply += content
                     yield f"data: {json.dumps({'content': content})}\n\n"
+            
+            # ============================================================
+            # 🔧 ЗАЩИТА ОТ ПУСТЫХ ОТВЕТОВ (для стриминга)
+            # ============================================================
+            if not full_reply or len(full_reply.strip()) < 5:
+                print(f"⚠️ ПУСТОЙ ОТВЕТ (stream) для запроса: {chat_request.message[:50]}...")
+                fallback = """Извините, я не смог сформулировать ответ. Пожалуйста, позвоните нашему агенту:
+
+📞 **Москва:** [+7 (499) 704-01-16](tel:+74997040116)
+📞 **Регионы:** [+7 (499) 704-01-50](tel:+74997040150)
+
+Или [📝 оставьте заявку](https://resostrahovka.ru/forma-ai/) — мы перезвоним вам сами."""
+                yield f"data: {json.dumps({'content': fallback})}\n\n"
+                full_reply = fallback
             
             set_cached_answer(chat_request.message, full_reply, detected_region)
             yield "data: [DONE]\n\n"
@@ -459,9 +498,9 @@ async def root():
         "status": "ok", 
         "message": "AI Assistant Backend is running!", 
         "model": "deepseek-v4-flash",
-        "temperature": 0.20,
-        "max_tokens": 1200,
-        "history": 5,
+        "temperature": 0.25,
+        "max_tokens": 1500,
+        "history": 8,
         "cache": "enabled",
         "region_detection": "timezone"
     }
@@ -474,9 +513,9 @@ async def health():
         "working_hours": is_working,
         "time": datetime.now().astimezone(timezone(timedelta(hours=3))).strftime("%Y-%m-%d %H:%M:%S MSK"),
         "cache_size": len(answer_cache),
-        "temperature": 0.20,
-        "max_tokens": 1200,
-        "history": 5,
+        "temperature": 0.25,
+        "max_tokens": 1500,
+        "history": 8,
         "region_detection": "timezone"
     }
 
