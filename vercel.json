@@ -8,8 +8,24 @@
   ],
   "routes": [
     {
-      "src": "/(.*)",
+      "src": "/api/(.*)",
       "dest": "main.py"
+    },
+    {
+      "src": "/health",
+      "dest": "main.py"
+    },
+    {
+      "src": "/cache",
+      "dest": "main.py"
+    },
+    {
+      "src": "/",
+      "dest": "main.py"
+    },
+    {
+      "src": "/(.*)",
+      "status": 404
     }
   ]
 }
