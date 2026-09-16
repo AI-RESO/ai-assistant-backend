@@ -18,14 +18,6 @@
     {
       "src": "/cache",
       "dest": "main.py"
-    },
-    {
-      "src": "/",
-      "dest": "main.py"
-    },
-    {
-      "src": "/(.*)",
-      "status": 404
     }
   ]
 }
