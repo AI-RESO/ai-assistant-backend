@@ -18,6 +18,14 @@
     {
       "src": "/cache",
       "dest": "main.py"
+    },
+    {
+      "src": "/metrics",
+      "dest": "main.py"
+    },
+    {
+      "src": "/(.*)",
+      "dest": "main.py"
     }
   ]
 }
